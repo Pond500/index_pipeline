@@ -1,0 +1,51 @@
+# config.yaml
+database:
+  host: "localhost"
+  port: 5444
+  user: "postgres"
+  password: "test" # <--- ใส่รหัสผ่านของคุณที่นี่
+  dbname: "test_index"
+
+paths:
+  # --- แก้ไข Path ไปยังโฟลเดอร์ข้อมูลของคุณ ---
+  docs_root: "/home/ai-intern02/index_pipeline/data"
+
+llm:
+  model: 'google/gemma-3-27b-it'
+  api_base: "http://203.156.3.45/vllm/v1"
+  api_key: "dopa"
+  temperature: 0.1
+  timeout: 120
+  context_char_limit: 9000
+
+embedding:
+  model_name: 'BAAI/bge-m3'
+  device: 'cuda' # หรือ 'cuda' ถ้ามี GPU
+
+chunking:
+  size: 1024      # ขนาดของ Chunk (ตัวอักษร)
+  overlap: 200     # จำนวนตัวอักษรที่ให้ทับซ้อนกันระหว่าง Chunk
+  # --- สวิตช์เลือกกลยุทธ์แบบใหม่ ---
+ # Options: 'STRUCTURE_AWARE', 'RECURSIVE', 'CINEMATIC'
+  strategy: 'RECURSIVE'
+
+parser_settings:
+  # รายการ Header พื้นฐานสำหรับ STRUCTURE_AWARE parser
+  default_headers:
+    - "สถานที่ติดต่อ"
+    - "เอกสาร/หลักฐานที่ใช้"
+    - "ค่าธรรมเนียม"
+    - "ระยะเวลา"
+    - "คุณสมบัติ"
+    - "คำเตือน"
+    - "หลักเกณฑ์"
+
+
+vector_store:
+  # กำหนดประเภทของ Vector Store ที่จะใช้: 'PGVECTOR' หรือ 'FAISS'
+  type: 'FAISS' 
+
+  # การตั้งค่าสำหรับ Faiss (จะถูกใช้เมื่อ type เป็น 'FAISS')
+  faiss:
+    index_path: "storage/faiss_index.bin"
+    metadata_path: "storage/metadata.json"

@@ -1,0 +1,22 @@
+services:
+  # ตั้งชื่อ service ของเราว่า postgres
+  postgres:
+    # ใช้ image ที่มี pgvector ติดตั้งมาให้แล้ว สะดวกมาก
+    image: pgvector/pgvector:pg16
+    container_name: test_index
+    environment:
+      # ตั้งค่า database ตามที่เราต้องการ
+      - POSTGRES_DB=test_index
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=test # <-- รหัสผ่านจากไฟล์ config.yaml
+    ports:
+      # แมพ Port 5432 ของเครื่องเรา ให้เชื่อมกับ Port 5432 ใน Container
+      - "5444:5432"
+    volumes:
+      # สร้าง volume ชื่อ postgres_data เพื่อเก็บข้อมูล database ไว้ แม้จะปิด container ไปแล้ว
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  # ประกาศ volume ที่จะใช้
+  postgres_data:

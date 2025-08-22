@@ -1,0 +1,7 @@
+# requirements.txt
+psycopg2-binary
+python-docx
+llama-index-llms-openai-like
+sentence-transformers
+pyyaml
+uuid
