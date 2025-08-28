@@ -8,7 +8,7 @@ database:
 
 paths:
   # --- แก้ไข Path ไปยังโฟลเดอร์ข้อมูลของคุณ ---
-  docs_root: "/home/ai-intern02/index_pipeline/data"
+  docs_root: "/home/ai-intern02/index_pipeline/_data_paper/fda"
 
 llm:
   model: 'google/gemma-3-27b-it'
@@ -23,11 +23,11 @@ embedding:
   device: 'cuda' # หรือ 'cuda' ถ้ามี GPU
 
 chunking:
-  size: 1024      # ขนาดของ Chunk (ตัวอักษร)
-  overlap: 200     # จำนวนตัวอักษรที่ให้ทับซ้อนกันระหว่าง Chunk
+  size: 2500      # ขนาดของ Chunk (ตัวอักษร)
+  overlap: 500     # จำนวนตัวอักษรที่ให้ทับซ้อนกันระหว่าง Chunk
   # --- สวิตช์เลือกกลยุทธ์แบบใหม่ ---
- # Options: 'STRUCTURE_AWARE', 'RECURSIVE', 'CINEMATIC'
-  strategy: 'RECURSIVE'
+ # Options: 'STRUCTURE_AWARE', 'RECURSIVE', CINEMATIC
+  strategy: 'CINEMATIC'
 
 parser_settings:
   # รายการ Header พื้นฐานสำหรับ STRUCTURE_AWARE parser
@@ -40,10 +40,16 @@ parser_settings:
     - "คำเตือน"
     - "หลักเกณฑ์"
 
+  cinematic_parser:
+    # ค่าความไวในการตรวจจับการเปลี่ยนเรื่อง (ค่าระหว่าง 0-100)
+    # ค่ายิ่งสูง -> ยิ่งตัดแบ่ง Chunk ยากขึ้น (ต้องการความแตกต่างของเนื้อหามากๆ ถึงจะตัด)
+    # ค่ามาตรฐานที่แนะนำคือ 95
+    breakpoint_percentile_threshold: 95
+
 
 vector_store:
   # กำหนดประเภทของ Vector Store ที่จะใช้: 'PGVECTOR' หรือ 'FAISS'
-  type: 'FAISS' 
+  type: 'FAISS'
 
   # การตั้งค่าสำหรับ Faiss (จะถูกใช้เมื่อ type เป็น 'FAISS')
   faiss:

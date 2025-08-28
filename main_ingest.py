@@ -3,6 +3,7 @@ import os
 import json
 import logging
 from datetime import datetime, timezone
+import docx
 
 from pipeline_lib.config_loader import load_config
 from pipeline_lib.db_handler import get_db_connection
@@ -12,84 +13,79 @@ from pipeline_lib.metadata_generator import METADATA_GENERATOR_REGISTRY
 
 def find_instruction_file(file_path, base_path):
     """
-    Searches for the correct metadata instruction file using a hierarchical approach.
-    1. Checks for a file-specific .meta.json (e.g., my_doc.meta.json).
-    2. If not found, checks for a folder-default _folder.meta.json in the current directory.
-    3. If not found, walks up to parent directories looking for _folder.meta.json until the base_path is reached.
+    Busca el archivo de instrucciones de metadatos correcto utilizando un enfoque jerárquico.
+    Ahora maneja tanto .txt como .docx.
     """
-    # 1. Check for file-specific override (e.g., 'document.meta.json')
-    specific_meta_path = file_path.replace(".txt", ".meta.json")
+    # 1. Cambiar la búsqueda de .meta.json para que sea dinámica
+    # Separa el nombre del archivo de su extensión y luego añade .meta.json
+    base_name = os.path.splitext(file_path)[0]
+    specific_meta_path = base_name + ".meta.json"
+    
     if os.path.exists(specific_meta_path):
         return specific_meta_path
 
-    # 2. Check for folder-level defaults ('_folder.meta.json') up the hierarchy
+    # (El resto de esta función es exactamente el mismo)
     current_dir = os.path.dirname(file_path)
-    # Normalize paths to ensure correct comparison
     norm_base_path = os.path.normpath(base_path)
-
     while True:
         folder_meta_path = os.path.join(current_dir, "_folder.meta.json")
         if os.path.exists(folder_meta_path):
             return folder_meta_path
-        
-        # Stop if we've reached or gone above the base path
         norm_current_dir = os.path.normpath(current_dir)
         if norm_current_dir == norm_base_path:
             break
-        
-        # Move up one directory
         parent_dir = os.path.dirname(current_dir)
-        if parent_dir == current_dir: # Reached the root of the filesystem
+        if parent_dir == current_dir:
             break
         current_dir = parent_dir
-        
     return None
 
 def process_source_folder(conn, config, llm_extractor):
-    """
-    Processes source files (.txt) using a hierarchical on-demand metadata system.
-    """
     base_path = config['paths']['docs_root']
-    logging.info(f"--- Starting Hierarchical On-Demand processing in root folder: {base_path} ---")
+    logging.info(f"--- Iniciando el procesamiento jerárquico bajo demanda en la carpeta raíz: {base_path} ---")
     items_added = 0
 
     for root, _, files in os.walk(base_path):
         for filename in files:
-            if not filename.endswith(".txt"):
+            # --- 2. Cambiar para buscar archivos .txt y .docx ---
+            if not filename.endswith((".txt", ".docx")):
                 continue
 
             file_full_path = os.path.join(root, filename)
-            
-            # --- START: New Hierarchical Logic ---
             instruction_file_path = find_instruction_file(file_full_path, base_path)
 
             if not instruction_file_path:
-                logging.debug(f"Skipping '{filename}': No instruction file (.meta.json or _folder.meta.json) found in hierarchy.")
+                logging.debug(f"Omitiendo '{filename}': No se encontró un archivo de instrucciones en la jerarquía.")
                 continue
-            # --- END: New Hierarchical Logic ---
-
+            
             try:
                 with open(instruction_file_path, 'r', encoding='utf-8') as f:
                     sidecar_data = json.load(f)
                 active_fields = sidecar_data.get("active_fields")
                 if not active_fields or not isinstance(active_fields, list):
-                    logging.warning(f"Skipping '{filename}': Instruction file '{instruction_file_path}' is missing a valid 'active_fields' list.")
+                    logging.warning(f"Omitiendo '{filename}': El archivo de instrucciones '{instruction_file_path}' no contiene una lista válida de 'active_fields'.")
                     continue
             except Exception as e:
-                logging.error(f"Could not read or parse instruction file '{instruction_file_path}' for '{filename}': {e}")
+                logging.error(f"No se pudo leer o analizar el archivo de instrucciones '{instruction_file_path}' para '{filename}': {e}")
                 continue
-            
-            logging.info(f"Processing '{filename}' using instructions from '{os.path.basename(instruction_file_path)}'")
+
+            logging.info(f"Procesando '{filename}' usando las instrucciones de '{os.path.basename(instruction_file_path)}'")
             
             try:
-                with open(file_full_path, 'r', encoding='utf-8') as f:
-                    full_content = f.read()
+                # --- 3. Añadir una condición para elegir el método de lectura de archivos según la extensión ---
+                full_content = ""
+                if filename.endswith(".txt"):
+                    with open(file_full_path, 'r', encoding='utf-8') as f:
+                        full_content = f.read()
+                elif filename.endswith(".docx"):
+                    document = docx.Document(file_full_path)
+                    full_content = "\n".join([p.text for p in document.paragraphs])
 
                 source_path_for_check = os.path.relpath(file_full_path, base_path).replace(os.path.sep, '/')
                 with conn.cursor() as cur:
                     cur.execute("SELECT id FROM knowledge_items WHERE (metadata->>'source_path') = %s", (source_path_for_check,))
                     if cur.fetchone():
-                        logging.info(f"Skipping '{filename}': Item already exists in database.")
+                        logging.info(f"Omitiendo '{filename}': El elemento ya existe en la base de datos.")
                         continue
 
                 final_metadata = {}
@@ -108,25 +104,24 @@ def process_source_folder(conn, config, llm_extractor):
                         if value is not None:
                             final_metadata[field_name] = value
                 
+                final_metadata["source_type"] = "RAG"
                 final_metadata["ingest_timestamp"] = datetime.now(timezone.utc).isoformat()
-               
-            
+                final_metadata["chunking_strategy"] = sidecar_data.get("chunking_strategy", "STRUCTURE_AWARE")
+                
                 with conn.cursor() as cur:
                     cur.execute(
-                        # --- แก้ไข SQL ให้มี 5 fields และ 5 placeholders ---
                         """INSERT INTO knowledge_items (source_type, status, title, full_content, metadata) VALUES (%s, %s, %s, %s, %s)""",
-                        # --- ข้อมูลใน tuple ก็มี 5 ตัว ตรงกันพอดี ---
                         ('RAG', 'active', final_metadata.get('document_title', filename), full_content, json.dumps(final_metadata, ensure_ascii=False))
                     )
                 items_added += 1
-                logging.info(f"Successfully ingested '{filename}'.")
+                logging.info(f"Se ha ingerido '{filename}' exitosamente.")
 
             except Exception as e:
-                logging.error(f"Failed to process '{filename}': {e}", exc_info=True)
+                logging.error(f"Fallo al procesar '{filename}': {e}", exc_info=True)
                 conn.rollback()
 
     conn.commit()
-    logging.info(f"--- File processing finished. Added {items_added} new items. ---")
+    logging.info(f"--- Procesamiento de archivos finalizado. Se añadieron {items_added} nuevos elementos. ---")
 
 
 def main():
@@ -144,7 +139,7 @@ def main():
     finally:
         if conn:
             conn.close()
-            logging.info("Database connection closed.")
+            logging.info("Conexión a la base de datos cerrada.")
 
 
 if __name__ == "__main__":

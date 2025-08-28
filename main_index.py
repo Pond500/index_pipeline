@@ -11,29 +11,30 @@ from pipeline_lib.db_handler import get_db_connection
 from pipeline_lib.utils import setup_logging
 from pipeline_lib.parsers import structured_parser, recursive_parser, cinematic_parser
 from pipeline_lib.storage import STORAGE_REGISTRY
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding # <-- เพิ่ม import นี้
 
 def main():
     """
     Main function to run the indexing pipeline.
     This script fetches items from 'knowledge_items' that have not yet been chunked,
     processes them according to the chunking strategy defined in config.yaml,
-    creates vector embeddings, and stores the final chunks in the configured vector store (PGVector or Faiss).
+    creates vector embeddings, and stores the final chunks in the configured vector store.
     """
     # 1. Setup and Configuration Loading
     setup_logging()
     config = load_config()
-    if not config:
-        return
+    if not config: return
 
-    # Load chunking settings and the direct strategy choice from config
+    # Load chunking settings and the global strategy
     chunk_config = config.get('chunking', {})
     CHUNK_SIZE = chunk_config.get('size', 1000)
     CHUNK_OVERLAP = chunk_config.get('overlap', 200)
-    GLOBAL_STRATEGY = chunk_config.get('strategy', 'RECURSIVE') # Default to RECURSIVE if not set
+    GLOBAL_STRATEGY = chunk_config.get('strategy', 'RECURSIVE')
 
-    # Load default headers for the STRUCTURE_AWARE parser
+    # Load parser-specific settings
     parser_config = config.get('parser_settings', {})
     DEFAULT_HEADERS = parser_config.get('default_headers', [])
+    CINEMATIC_THRESHOLD = parser_config.get('cinematic_parser', {}).get('breakpoint_percentile_threshold', 95)
     
     logging.info(f"Global chunking strategy set to: '{GLOBAL_STRATEGY}'")
 
@@ -45,11 +46,15 @@ def main():
     )
     logging.info("Model loaded successfully.")
 
+    # --- สร้าง LlamaIndex Adapter เพียงครั้งเดียว ---
+    logging.info("Creating LlamaIndex embedding adapter...")
+    llama_embed_adapter = HuggingFaceEmbedding(model_name=config['embedding']['model_name'])
+    logging.info("Adapter created successfully.")
+
     # 3. Initialize Storage Adapter
     store_config = config.get('vector_store', {})
     store_type = store_config.get('type', 'PGVECTOR')
     storage_adapter = None
-    # The database connection is used for fetching source data and for the PGVector store.
     conn = get_db_connection(config['database'])
     if not conn: return
     
@@ -68,7 +73,6 @@ def main():
     try:
         with conn.cursor() as cur:
             # 4. Fetch Items to Process from PostgreSQL
-            # PostgreSQL serves as the source of truth for raw content (knowledge_items)
             cur.execute("""
                 SELECT ki.id, ki.full_content, ki.metadata
                 FROM knowledge_items ki
@@ -83,7 +87,7 @@ def main():
 
             logging.info(f"Found {len(items_to_process)} items to process.")
 
-            all_chunks_to_store = [] # Accumulator for all chunks from all documents
+            all_chunks_to_store = []
 
             # 5. Process Each Item
             for item_id, full_content, parent_metadata in items_to_process:
@@ -93,10 +97,10 @@ def main():
                 
                 base_metadata = parent_metadata.copy()
                 base_metadata['document_id'] = item_id
-                base_metadata['chunking_strategy'] = GLOBAL_STRATEGY # บันทึก Strategy ที่ใช้จริง
+                base_metadata['chunking_strategy'] = GLOBAL_STRATEGY
+                
                 chunks = []
                 
-                # --- Logic to select parser based on global strategy ---
                 if GLOBAL_STRATEGY == 'STRUCTURE_AWARE':
                     logging.info(f"  > Using 'STRUCTURE_AWARE' strategy for item ID {item_id}.")
                     headers_for_this_item = parent_metadata.get("custom_headers", DEFAULT_HEADERS)
@@ -110,7 +114,8 @@ def main():
                 
                 elif GLOBAL_STRATEGY == 'CINEMATIC':
                     logging.info(f"  > Using 'CINEMATIC' strategy for item ID {item_id}.")
-                    chunks = cinematic_parser.parse_document(full_content, base_metadata, model)
+                    # --- ส่ง Adapter ที่สร้างไว้แล้วเข้าไป ---
+                    chunks = cinematic_parser.parse_document(full_content, base_metadata, llama_embed_adapter, CINEMATIC_THRESHOLD)
 
                 else:
                     logging.warning(f"  > Unknown strategy '{GLOBAL_STRATEGY}'. Defaulting to RECURSIVE.")
@@ -131,7 +136,7 @@ def main():
                     chunk_meta['chunk_id'] = str(uuid.uuid4())
                     chunk_meta['chunk_sequence'] = i + 1
                     chunk_meta['indexing_timestamp'] = datetime.now(timezone.utc).isoformat()
-                    chunk_meta['schema_version'] = "2.0" # Version for modular storage
+                    chunk_meta['schema_version'] = "2.2" # Version with performance fix
                     
                     embedding_vector = embeddings[i].tolist()
                     
@@ -139,16 +144,16 @@ def main():
                         (item_id, chunk_text, i + 1, embedding_vector, chunk_meta)
                     )
 
-        # --- 8. Save all accumulated chunks at once using the adapter ---
+        # 8. Save all accumulated chunks at once using the adapter
         if all_chunks_to_store:
             storage_adapter.add(all_chunks_to_store)
-            storage_adapter.persist() # This command is crucial for Faiss
+            storage_adapter.persist()
         else:
             logging.info("No new chunks were created to be stored.")
 
     except Exception as e:
         logging.error(f"An unexpected error occurred during indexing: {e}", exc_info=True)
-        if conn: conn.rollback()
+        if store_type == 'PGVECTOR' and conn: conn.rollback()
     finally:
         if conn:
             conn.close()
